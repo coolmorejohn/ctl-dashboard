@@ -80,9 +80,9 @@
       // Helper: Write large data in chunks
       async writeChunked(sheetName, dataObj) {
         // For Shipments: { dataDate, shipments: [...] }
-        // Split shipments array into chunks of 25 items each
+        // Split shipments array into chunks of 5 items each (URLs have ~8000 char limit)
         const shipments = dataObj.shipments || [];
-        const chunkSize = 25;
+        const chunkSize = 5;
         const chunks = [];
 
         for (let i = 0; i < shipments.length; i += chunkSize) {
