@@ -78,12 +78,11 @@
       },
 
       // Helper: Write large data in chunks (SEQUENTIAL)
-      // Google Apps Script URL limit is ~2048 chars, so we use very small chunks
       async writeChunked(sheetName, dataObj) {
-        // For Shipments/DailyLogs: split into chunks of 1 item each (to stay under URL limit)
+        // For Shipments/DailyLogs: split into chunks of 5 items each
         const isShipments = dataObj.shipments !== undefined;
         const items = isShipments ? (dataObj.shipments || []) : (Array.isArray(dataObj) ? dataObj : []);
-        const chunkSize = 1; // 1 item per chunk to stay under 2048 char URL limit
+        const chunkSize = 5;
         const chunks = [];
 
         for (let i = 0; i < items.length; i += chunkSize) {
@@ -92,7 +91,7 @@
 
         console.log(`Writing ${sheetName} in ${chunks.length} chunks (sequential)...`);
 
-        // Process chunks SEQUENTIALLY to avoid overwhelming Google Apps Script
+        // Process chunks SEQUENTIALLY - this was working before
         for (let i = 0; i < chunks.length; i++) {
           const chunk = chunks[i];
           const isFirst = i === 0;
@@ -112,11 +111,7 @@
           const encoded = encodeURIComponent(JSON.stringify(payload));
           const url = `${SCRIPT_URL}?payload=${encoded}&t=${Date.now()}&c=${i}`;
 
-          // Debug: log URL length to check if we're hitting limits
-          console.log(`Chunk ${i + 1} URL length: ${url.length} chars`);
-          if (url.length > 2000) {
-            console.warn(`WARNING: URL length ${url.length} may exceed Google's limit!`);
-          }
+          console.log(`Chunk ${i + 1}/${chunks.length} sending...`);
 
           const response = await fetch(url);
           if (!response.ok) throw new Error(`HTTP ${response.status} on chunk ${i + 1}`);
