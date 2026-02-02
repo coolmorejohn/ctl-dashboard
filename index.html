@@ -77,7 +77,7 @@
         return response.json();
       },
 
-      // Helper: Write large data in chunks (PARALLEL for speed)
+      // Helper: Write large data in chunks (STAGGERED PARALLEL for speed + reliability)
       async writeChunked(sheetName, dataObj) {
         // For Shipments/DailyLogs: split into chunks of 5 items
         const isShipments = dataObj.shipments !== undefined;
@@ -89,7 +89,7 @@
           chunks.push(items.slice(i, i + chunkSize));
         }
 
-        console.log(`Writing ${sheetName} in ${chunks.length} chunks (parallel)...`);
+        console.log(`Writing ${sheetName} in ${chunks.length} chunks (staggered parallel)...`);
 
         // Build all requests
         const requests = chunks.map((chunk, i) => {
@@ -116,18 +116,25 @@
         const firstReq = requests[0];
         const firstResponse = await fetch(firstReq.url);
         if (!firstResponse.ok) throw new Error(`HTTP ${firstResponse.status} on chunk 1`);
-        console.log(`Chunk 1/${chunks.length} written`);
+        const firstResult = await firstResponse.json();
+        console.log(`Chunk 1/${chunks.length} written`, firstResult);
 
-        // Fire all remaining requests in PARALLEL
+        // Fire remaining requests with small stagger to prevent overwhelming the server
+        // Server uses LockService, but staggering reduces lock contention
         if (requests.length > 1) {
-          const remainingPromises = requests.slice(1).map(async (req) => {
+          const STAGGER_MS = 100; // 100ms between starting each request
+          const remainingPromises = requests.slice(1).map(async (req, idx) => {
+            // Stagger the start of each request
+            await new Promise(resolve => setTimeout(resolve, idx * STAGGER_MS));
             const response = await fetch(req.url);
             if (!response.ok) throw new Error(`HTTP ${response.status} on chunk ${req.index + 1}`);
+            const result = await response.json();
+            console.log(`Chunk ${req.index + 1}/${chunks.length} written`, result);
             return req.index;
           });
 
           await Promise.all(remainingPromises);
-          console.log(`Chunks 2-${chunks.length} written (parallel)`);
+          console.log(`All ${chunks.length} chunks written successfully`);
         }
 
         return { success: true, chunks: chunks.length };
