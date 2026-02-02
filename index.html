@@ -112,6 +112,12 @@
           const encoded = encodeURIComponent(JSON.stringify(payload));
           const url = `${SCRIPT_URL}?payload=${encoded}&t=${Date.now()}&c=${i}`;
 
+          // Debug: log URL length to check if we're hitting limits
+          console.log(`Chunk ${i + 1} URL length: ${url.length} chars`);
+          if (url.length > 2000) {
+            console.warn(`WARNING: URL length ${url.length} may exceed Google's limit!`);
+          }
+
           const response = await fetch(url);
           if (!response.ok) throw new Error(`HTTP ${response.status} on chunk ${i + 1}`);
           const result = await response.json();
