@@ -310,6 +310,7 @@
 
       // Core data
       const [shipments, setShipments] = useState([]);
+      const [shipmentsDataDate, setShipmentsDataDate] = useState(null); // Track when shipment data was uploaded
       const [dailyLogs, setDailyLogs] = useState([]);
 
       // Fleet - array of trucks with their properties
@@ -373,7 +374,18 @@
 
           if (data.Fleet?.length > 0) setFleet(data.Fleet);
           if (data.Goals) setGoals(prev => ({ ...prev, ...data.Goals }));
-          if (data.Shipments) setShipments(data.Shipments);
+          // Shipments now stored as { dataDate, shipments } object
+          if (data.Shipments) {
+            if (data.Shipments.shipments) {
+              // New format with date tracking
+              setShipments(data.Shipments.shipments);
+              setShipmentsDataDate(data.Shipments.dataDate || null);
+            } else if (Array.isArray(data.Shipments)) {
+              // Old format (just array) - no date available
+              setShipments(data.Shipments);
+              setShipmentsDataDate(null);
+            }
+          }
           if (data.DailyLogs) setDailyLogs(data.DailyLogs);
           if (data.MonthlyPlan) setMonthlyPlan(data.MonthlyPlan);
           if (data.TruckStatus) {
@@ -809,6 +821,7 @@
             const excludedStatuses = ['Pending', 'Canceled'];
             const filtered = parsed.filter(s => !excludedStatuses.includes(s.status));
             setShipments(filtered);
+            setShipmentsDataDate(reportDate); // Track when this data was uploaded
 
             const msg = splitCount > 0
               ? `${filtered.length} shipments loaded (${splitCount} split orders)`
@@ -906,11 +919,12 @@
 
         // Save all data
         const statusData = { status: truckStatus, expectedReturn: truckExpectedReturn };
+        const shipmentsData = { dataDate: shipmentsDataDate || reportDate, shipments };
 
         await Promise.all([
           SheetsDB.write('Fleet', fleet, reportDate),
           SheetsDB.write('TruckStatus', statusData, reportDate),
-          SheetsDB.write('Shipments', shipments, reportDate),
+          SheetsDB.write('Shipments', shipmentsData, reportDate),
           SheetsDB.write('DailyLogs', newLogs, reportDate),
           SheetsDB.write('MonthlyPlan', monthlyPlan, reportDate),
         ]);
@@ -919,7 +933,7 @@
         setConnectionStatus(connected ? 'connected' : 'offline');
         showStatus(connected ? `Saved & logged ${reportDate} ✓` : 'Saved locally ⚠', 3000);
         setSyncing(false);
-      }, [fleet, truckStatus, truckExpectedReturn, shipments, dailyLogs, reportDate, truckMetrics, truckGoals, icMetrics, fleetCounts, companyMetrics, totalGoals, monthlyPlan, workdaysCalc, flaggedLoads]);
+      }, [fleet, truckStatus, truckExpectedReturn, shipments, shipmentsDataDate, dailyLogs, reportDate, truckMetrics, truckGoals, icMetrics, fleetCounts, companyMetrics, totalGoals, monthlyPlan, workdaysCalc, flaggedLoads]);
 
       // ============================================
       // SAVE GOALS
@@ -1143,6 +1157,29 @@
                     <p className="text-blue-600 text-sm mt-1">
                       Upload a TORO export on the <button onClick={() => setActiveTab('status')} className="underline font-medium">Status tab</button> to populate the dashboard with real data.
                     </p>
+                  </div>
+                )}
+
+                {/* Stale data warning - shipments from different day than report date */}
+                {shipments.length > 0 && shipmentsDataDate && shipmentsDataDate !== reportDate && (
+                  <div className="bg-yellow-50 border border-yellow-300 rounded-lg p-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="text-yellow-600 text-xl">📅</span>
+                        <div>
+                          <p className="text-yellow-800 font-medium">
+                            Shipment data is from {new Date(shipmentsDataDate + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
+                          </p>
+                          <p className="text-yellow-600 text-sm">
+                            Report date is {new Date(reportDate + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}. Upload a fresh TORO export if needed.
+                          </p>
+                        </div>
+                      </div>
+                      <button onClick={() => setActiveTab('status')}
+                        className="px-3 py-1 text-sm font-medium text-yellow-700 bg-yellow-100 hover:bg-yellow-200 rounded-lg transition-colors">
+                        Go to Status
+                      </button>
+                    </div>
                   </div>
                 )}
 
