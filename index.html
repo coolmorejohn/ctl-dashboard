@@ -149,8 +149,8 @@
         if (reportDate) payload.reportDate = reportDate;
         const payloadStr = JSON.stringify(payload);
 
-        // Use chunked writes for Shipments and DailyLogs (large data)
-        if ((sheetName === 'Shipments' || sheetName === 'DailyLogs') && payloadStr.length > 4000) {
+        // Use chunked writes for Shipments only (has shipments array)
+        if (sheetName === 'Shipments' && data.shipments && payloadStr.length > 4000) {
           try {
             const result = await this.writeChunked(sheetName, data);
             console.log(`Sheets chunked write result for ${sheetName}:`, result);
@@ -159,6 +159,12 @@
             console.warn(`Sheets chunked write failed for ${sheetName}:`, error.message);
             return { success: false, synced: false, error: error.message };
           }
+        }
+
+        // For DailyLogs or other large data, just save to localStorage only (can't sync large arrays via GET)
+        if (payloadStr.length > 4000) {
+          console.warn(`${sheetName} too large for GET sync (${payloadStr.length} chars), saved to localStorage only`);
+          return { success: true, synced: false, method: 'LOCAL_ONLY', reason: 'payload too large' };
         }
 
         // Use GET for small payloads
@@ -459,7 +465,11 @@
               setShipmentsDataDate(null);
             }
           }
-          if (data.DailyLogs) setDailyLogs(data.DailyLogs);
+          if (data.DailyLogs) {
+            // Ensure DailyLogs is always an array
+            const logs = Array.isArray(data.DailyLogs) ? data.DailyLogs : [];
+            setDailyLogs(logs);
+          }
           if (data.MonthlyPlan) setMonthlyPlan(data.MonthlyPlan);
           if (data.TruckStatus) {
             setTruckStatus(data.TruckStatus.status || {});
@@ -1132,7 +1142,7 @@
             if (data.fleet) setFleet(data.fleet);
             if (data.goals) setGoals(prev => ({ ...prev, ...data.goals }));
             if (data.monthlyPlan) setMonthlyPlan(data.monthlyPlan);
-            if (data.dailyLogs) setDailyLogs(data.dailyLogs);
+            if (data.dailyLogs) setDailyLogs(Array.isArray(data.dailyLogs) ? data.dailyLogs : []);
             if (data.shipments) setShipments(data.shipments);
             if (data.truckStatus) {
               setTruckStatus(data.truckStatus.status || {});
