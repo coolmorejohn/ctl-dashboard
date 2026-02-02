@@ -77,9 +77,10 @@
         return response.json();
       },
 
-      // Helper: Write large data in chunks (STAGGERED PARALLEL for speed + reliability)
+      // Helper: Write large data in chunks (SEQUENTIAL with batched parallelism)
+      // Google Apps Script can't handle too many concurrent requests, so we process in small batches
       async writeChunked(sheetName, dataObj) {
-        // For Shipments/DailyLogs: split into chunks of 5 items
+        // For Shipments/DailyLogs: split into chunks of 5 items each
         const isShipments = dataObj.shipments !== undefined;
         const items = isShipments ? (dataObj.shipments || []) : (Array.isArray(dataObj) ? dataObj : []);
         const chunkSize = 5;
@@ -89,15 +90,16 @@
           chunks.push(items.slice(i, i + chunkSize));
         }
 
-        console.log(`Writing ${sheetName} in ${chunks.length} chunks (staggered parallel)...`);
+        console.log(`Writing ${sheetName} in ${chunks.length} chunks (sequential)...`);
 
-        // Build all requests
-        const requests = chunks.map((chunk, i) => {
+        // Process chunks SEQUENTIALLY to avoid overwhelming Google Apps Script
+        for (let i = 0; i < chunks.length; i++) {
+          const chunk = chunks[i];
           const isFirst = i === 0;
           let payload;
 
           if (isFirst) {
-            // First chunk includes metadata
+            // First chunk includes metadata and clears the sheet
             if (isShipments) {
               payload = { action: 'write', sheet: sheetName, data: { dataDate: dataObj.dataDate, shipments: chunk, totalChunks: chunks.length } };
             } else {
@@ -109,34 +111,17 @@
 
           const encoded = encodeURIComponent(JSON.stringify(payload));
           const url = `${SCRIPT_URL}?payload=${encoded}&t=${Date.now()}&c=${i}`;
-          return { url, index: i };
-        });
 
-        // Fire first request, wait for it (clears the sheet)
-        const firstReq = requests[0];
-        const firstResponse = await fetch(firstReq.url);
-        if (!firstResponse.ok) throw new Error(`HTTP ${firstResponse.status} on chunk 1`);
-        const firstResult = await firstResponse.json();
-        console.log(`Chunk 1/${chunks.length} written`, firstResult);
+          const response = await fetch(url);
+          if (!response.ok) throw new Error(`HTTP ${response.status} on chunk ${i + 1}`);
+          const result = await response.json();
 
-        // Fire remaining requests with small stagger to prevent overwhelming the server
-        // Server uses LockService, but staggering reduces lock contention
-        if (requests.length > 1) {
-          const STAGGER_MS = 100; // 100ms between starting each request
-          const remainingPromises = requests.slice(1).map(async (req, idx) => {
-            // Stagger the start of each request
-            await new Promise(resolve => setTimeout(resolve, idx * STAGGER_MS));
-            const response = await fetch(req.url);
-            if (!response.ok) throw new Error(`HTTP ${response.status} on chunk ${req.index + 1}`);
-            const result = await response.json();
-            console.log(`Chunk ${req.index + 1}/${chunks.length} written`, result);
-            return req.index;
-          });
+          if (result.error) throw new Error(`Server error on chunk ${i + 1}: ${result.error}`);
 
-          await Promise.all(remainingPromises);
-          console.log(`All ${chunks.length} chunks written successfully`);
+          console.log(`Chunk ${i + 1}/${chunks.length} written`, result);
         }
 
+        console.log(`All ${chunks.length} chunks written successfully`);
         return { success: true, chunks: chunks.length };
       },
 
