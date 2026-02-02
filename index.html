@@ -389,6 +389,1243 @@
     }
 
     // ============================================
+    // REPORTS TAB COMPONENT
+    // ============================================
+    function ReportsTab({ dailyLogs, fleet, goals, truckStatus, truckExpectedReturn }) {
+      const [dateRange, setDateRange] = useState(30);
+      const [activeReport, setActiveReport] = useState('overview');
+
+      const DAILY_GOAL = goals.dailyRevenuePerTruck || 940;
+
+      // Status colors
+      const STATUS_COLORS = {
+        'Active': '#22c55e',
+        'Needs Driver': '#f59e0b',
+        'Shop - Break/Fix': '#ef4444',
+        'Shop - Routine': '#3b82f6',
+        'Spare': '#9ca3af'
+      };
+
+      // Filter logs by date range
+      const filteredLogs = useMemo(() => {
+        if (!dailyLogs || dailyLogs.length === 0) return [];
+        return dailyLogs.slice(-dateRange);
+      }, [dailyLogs, dateRange]);
+
+      // Get truck IDs from fleet (excluding spare)
+      const truckIds = useMemo(() => {
+        return fleet.filter(t => t.id !== '205').map(t => t.id);
+      }, [fleet]);
+
+      // Build truck timeline from daily logs
+      const truckTimeline = useMemo(() => {
+        if (filteredLogs.length === 0) return [];
+
+        return truckIds.map(truckId => {
+          const days = filteredLogs.map(log => {
+            const truck = log.trucks?.find(t => t.truckId === truckId);
+            return {
+              date: log.date,
+              status: truck?.status || 'Unknown',
+              driver: truck?.driver || '',
+              expectedReturn: truck?.expectedReturn || '',
+              revenue: truck?.revenue || 0,
+              notes: truck?.notes || ''
+            };
+          });
+
+          const activeDays = days.filter(d => d.status === 'Active').length;
+          const downDays = days.length - activeDays;
+          const lastDay = days[days.length - 1] || {};
+
+          return {
+            truckId,
+            days,
+            activeDays,
+            downDays,
+            currentStatus: lastDay.status,
+            currentDriver: lastDay.driver,
+            expectedReturn: lastDay.expectedReturn
+          };
+        });
+      }, [filteredLogs, truckIds]);
+
+      // Calculate metrics
+      const metrics = useMemo(() => {
+        let totalDowntimeDays = { nodriver: 0, breakfix: 0, routine: 0 };
+        let opportunityCost = 0;
+
+        filteredLogs.forEach(log => {
+          const summary = log.summary || {};
+          totalDowntimeDays.nodriver += summary.nodriver || 0;
+          totalDowntimeDays.breakfix += summary.breakfix || 0;
+          totalDowntimeDays.routine += summary.routine || 0;
+          opportunityCost += ((summary.nodriver || 0) + (summary.breakfix || 0) + (summary.routine || 0)) * DAILY_GOAL;
+        });
+
+        const avgActive = filteredLogs.length > 0
+          ? filteredLogs.reduce((sum, l) => sum + (l.summary?.active || 0), 0) / filteredLogs.length
+          : 0;
+
+        const totalDowntime = totalDowntimeDays.nodriver + totalDowntimeDays.breakfix + totalDowntimeDays.routine;
+
+        return {
+          totalDowntimeDays,
+          opportunityCost,
+          avgActive: avgActive.toFixed(1),
+          totalDowntime,
+          utilizationRate: truckIds.length > 0 ? ((avgActive / truckIds.length) * 100).toFixed(1) : 0
+        };
+      }, [filteredLogs, DAILY_GOAL, truckIds]);
+
+      // Weekly trend data
+      const weeklyTrend = useMemo(() => {
+        const weeks = {};
+        filteredLogs.forEach(log => {
+          const d = new Date(log.date);
+          const weekStart = new Date(d);
+          weekStart.setDate(d.getDate() - d.getDay());
+          const weekKey = weekStart.toISOString().split('T')[0];
+
+          if (!weeks[weekKey]) {
+            weeks[weekKey] = { active: [], down: [], revenue: [] };
+          }
+          const summary = log.summary || {};
+          weeks[weekKey].active.push(summary.active || 0);
+          weeks[weekKey].down.push((summary.nodriver || 0) + (summary.breakfix || 0) + (summary.routine || 0));
+          weeks[weekKey].revenue.push(summary.totalRevenue || 0);
+        });
+
+        return Object.entries(weeks).map(([week, data]) => ({
+          week: new Date(week).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+          avgActive: (data.active.reduce((a,b) => a+b, 0) / data.active.length).toFixed(1),
+          avgDown: (data.down.reduce((a,b) => a+b, 0) / data.down.length).toFixed(1),
+          totalRevenue: data.revenue.reduce((a,b) => a+b, 0)
+        }));
+      }, [filteredLogs]);
+
+      // Downtime breakdown for display
+      const downtimeBreakdown = useMemo(() => {
+        const { totalDowntimeDays } = metrics;
+        return [
+          { name: 'Needs Driver', value: totalDowntimeDays.nodriver, color: STATUS_COLORS['Needs Driver'], cost: totalDowntimeDays.nodriver * DAILY_GOAL },
+          { name: 'Break/Fix', value: totalDowntimeDays.breakfix, color: STATUS_COLORS['Shop - Break/Fix'], cost: totalDowntimeDays.breakfix * DAILY_GOAL },
+          { name: 'Routine', value: totalDowntimeDays.routine, color: STATUS_COLORS['Shop - Routine'], cost: totalDowntimeDays.routine * DAILY_GOAL },
+        ].filter(d => d.value > 0);
+      }, [metrics, DAILY_GOAL]);
+
+      // Find trucks currently down with expected return dates
+      const trucksDown = useMemo(() => {
+        return truckTimeline
+          .filter(t => t.currentStatus && t.currentStatus !== 'Active' && t.currentStatus !== 'Spare')
+          .map(truck => {
+            // Find when truck went down
+            const downStartIndex = truck.days.findIndex(d => d.status !== 'Active' && d.status !== 'Spare');
+            const downStartDate = downStartIndex >= 0 ? truck.days[downStartIndex].date : null;
+            const daysDown = downStartIndex >= 0 ? truck.days.length - downStartIndex : 0;
+
+            return {
+              ...truck,
+              downStartDate,
+              daysDown,
+              opportunityCost: daysDown * DAILY_GOAL
+            };
+          });
+      }, [truckTimeline, DAILY_GOAL]);
+
+      // ===== DRIVER LEADERBOARD DATA =====
+      const driverLeaderboard = useMemo(() => {
+        const driverStats = {};
+
+        filteredLogs.forEach(log => {
+          (log.trucks || []).forEach(truck => {
+            if (truck.driver && truck.status === 'Active') {
+              if (!driverStats[truck.driver]) {
+                driverStats[truck.driver] = {
+                  name: truck.driver,
+                  daysActive: 0,
+                  totalRevenue: 0,
+                  trucks: new Set()
+                };
+              }
+              driverStats[truck.driver].daysActive++;
+              driverStats[truck.driver].totalRevenue += truck.revenue || 0;
+              driverStats[truck.driver].trucks.add(truck.truckId);
+            }
+          });
+        });
+
+        return Object.values(driverStats)
+          .map(d => ({
+            ...d,
+            trucks: Array.from(d.trucks),
+            avgRevenue: d.daysActive > 0 ? Math.round(d.totalRevenue / d.daysActive) : 0,
+            vsGoal: d.daysActive > 0 ? Math.round(((d.totalRevenue / d.daysActive) / DAILY_GOAL) * 100) : 0
+          }))
+          .sort((a, b) => b.avgRevenue - a.avgRevenue);
+      }, [filteredLogs, DAILY_GOAL]);
+
+      // ===== REVENUE TREND DATA =====
+      const revenueTrend = useMemo(() => {
+        return filteredLogs.map(log => ({
+          date: log.date,
+          displayDate: new Date(log.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+          totalRevenue: log.summary?.totalRevenue || 0,
+          activeTrucks: log.summary?.active || 0,
+          avgPerTruck: log.summary?.active > 0
+            ? Math.round((log.summary?.totalRevenue || 0) / log.summary.active)
+            : 0,
+          goal: (log.summary?.active || 0) * DAILY_GOAL
+        }));
+      }, [filteredLogs, DAILY_GOAL]);
+
+      const revenueStats = useMemo(() => {
+        if (revenueTrend.length === 0) return { total: 0, avg: 0, goalAchievement: 0, bestDay: null, worstDay: null };
+
+        const total = revenueTrend.reduce((sum, d) => sum + d.totalRevenue, 0);
+        const totalGoal = revenueTrend.reduce((sum, d) => sum + d.goal, 0);
+        const sorted = [...revenueTrend].sort((a, b) => b.totalRevenue - a.totalRevenue);
+
+        return {
+          total,
+          avg: Math.round(total / revenueTrend.length),
+          goalAchievement: totalGoal > 0 ? Math.round((total / totalGoal) * 100) : 0,
+          bestDay: sorted[0],
+          worstDay: sorted[sorted.length - 1]
+        };
+      }, [revenueTrend]);
+
+      // ===== IC CARRIER SCORECARD DATA =====
+      const icScorecard = useMemo(() => {
+        const icStats = {};
+
+        filteredLogs.forEach(log => {
+          (log.ics || []).forEach(ic => {
+            const name = ic.name || ic.carrier || 'Unknown';
+            if (!icStats[name]) {
+              icStats[name] = {
+                name,
+                daysWorked: 0,
+                totalLoads: 0,
+                totalRevenue: 0,
+                truckTypes: new Set()
+              };
+            }
+            icStats[name].daysWorked++;
+            icStats[name].totalLoads += ic.loads || 1;
+            icStats[name].totalRevenue += ic.revenue || 0;
+            if (ic.type) icStats[name].truckTypes.add(ic.type);
+          });
+        });
+
+        return Object.values(icStats)
+          .map(ic => ({
+            ...ic,
+            truckTypes: Array.from(ic.truckTypes),
+            avgRevenuePerDay: ic.daysWorked > 0 ? Math.round(ic.totalRevenue / ic.daysWorked) : 0,
+            avgLoadsPerDay: ic.daysWorked > 0 ? (ic.totalLoads / ic.daysWorked).toFixed(1) : 0
+          }))
+          .sort((a, b) => b.totalRevenue - a.totalRevenue);
+      }, [filteredLogs]);
+
+      // ===== MONTH-OVER-MONTH DATA =====
+      const monthlyComparison = useMemo(() => {
+        const months = {};
+
+        filteredLogs.forEach(log => {
+          const monthKey = log.date.substring(0, 7); // YYYY-MM
+          if (!months[monthKey]) {
+            months[monthKey] = {
+              month: monthKey,
+              days: 0,
+              totalRevenue: 0,
+              activeTruckDays: 0,
+              downtimeDays: 0,
+              opportunityCost: 0
+            };
+          }
+          months[monthKey].days++;
+          months[monthKey].totalRevenue += log.summary?.totalRevenue || 0;
+          months[monthKey].activeTruckDays += log.summary?.active || 0;
+          const downtime = (log.summary?.nodriver || 0) + (log.summary?.breakfix || 0) + (log.summary?.routine || 0);
+          months[monthKey].downtimeDays += downtime;
+          months[monthKey].opportunityCost += downtime * DAILY_GOAL;
+        });
+
+        const monthList = Object.values(months)
+          .map(m => ({
+            ...m,
+            displayMonth: new Date(m.month + '-01').toLocaleDateString('en-US', { month: 'long', year: 'numeric' }),
+            avgDailyRevenue: m.days > 0 ? Math.round(m.totalRevenue / m.days) : 0,
+            avgActiveTrucks: m.days > 0 ? (m.activeTruckDays / m.days).toFixed(1) : 0,
+            utilization: m.days > 0 && truckIds.length > 0
+              ? Math.round((m.activeTruckDays / (m.days * truckIds.length)) * 100)
+              : 0
+          }))
+          .sort((a, b) => a.month.localeCompare(b.month));
+
+        // Add MoM changes
+        return monthList.map((m, idx) => {
+          if (idx === 0) return { ...m, revenueChange: null, utilizationChange: null };
+          const prev = monthList[idx - 1];
+          return {
+            ...m,
+            revenueChange: prev.avgDailyRevenue > 0
+              ? Math.round(((m.avgDailyRevenue - prev.avgDailyRevenue) / prev.avgDailyRevenue) * 100)
+              : null,
+            utilizationChange: prev.utilization > 0
+              ? m.utilization - prev.utilization
+              : null
+          };
+        });
+      }, [filteredLogs, truckIds.length, DAILY_GOAL]);
+
+      // ===== TRUCK ROI DATA =====
+      const truckROI = useMemo(() => {
+        return truckTimeline.map(truck => {
+          const totalRevenue = truck.days.reduce((sum, d) => sum + (d.revenue || 0), 0);
+          const activeDays = truck.days.filter(d => d.status === 'Active').length;
+          const downDays = truck.days.length - activeDays;
+          const opportunityCost = downDays * DAILY_GOAL;
+          const utilization = truck.days.length > 0 ? Math.round((activeDays / truck.days.length) * 100) : 0;
+          const avgDailyRevenue = activeDays > 0 ? Math.round(totalRevenue / activeDays) : 0;
+
+          // Calculate ROI score (weighted: 60% utilization, 40% revenue performance)
+          const revenuePerformance = avgDailyRevenue > 0 ? Math.min((avgDailyRevenue / DAILY_GOAL) * 100, 150) : 0;
+          const roiScore = Math.round((utilization * 0.6) + (revenuePerformance * 0.4));
+
+          return {
+            truckId: truck.truckId,
+            currentStatus: truck.currentStatus,
+            currentDriver: truck.currentDriver,
+            totalRevenue,
+            activeDays,
+            downDays,
+            opportunityCost,
+            utilization,
+            avgDailyRevenue,
+            roiScore,
+            netContribution: totalRevenue - opportunityCost
+          };
+        }).sort((a, b) => b.roiScore - a.roiScore);
+      }, [truckTimeline, DAILY_GOAL]);
+
+      // Empty state
+      if (!dailyLogs || dailyLogs.length === 0) {
+        return (
+          <div className="bg-white rounded-lg shadow-sm p-8 text-center">
+            <div className="text-6xl mb-4">📊</div>
+            <h2 className="text-xl font-semibold text-gray-800 mb-2">No Historical Data Yet</h2>
+            <p className="text-gray-600 mb-4">
+              Reports are generated from your daily logs. Start saving daily snapshots on the Status tab to build your reporting history.
+            </p>
+            <p className="text-sm text-gray-500">
+              Each time you click "Save & Log Day", a snapshot is saved that powers these reports.
+            </p>
+          </div>
+        );
+      }
+
+      return (
+        <div className="space-y-6">
+          {/* Header */}
+          <div className="bg-white rounded-lg shadow-sm p-4">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <h2 className="text-lg font-semibold text-gray-800">Fleet Performance Reports</h2>
+                <p className="text-sm text-gray-500">
+                  {filteredLogs.length} days of data ({filteredLogs[0]?.date} to {filteredLogs[filteredLogs.length - 1]?.date})
+                </p>
+              </div>
+              <div className="flex gap-2">
+                {[30, 60, 90].map(days => (
+                  <button
+                    key={days}
+                    onClick={() => setDateRange(days)}
+                    disabled={dailyLogs.length < days}
+                    className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                      dateRange === days
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                    } ${dailyLogs.length < days ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  >
+                    {days}d
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Sub-tabs */}
+            <div className="flex gap-1 mt-4 pt-3 border-t overflow-x-auto">
+              {[
+                { id: 'overview', label: '📈 Overview' },
+                { id: 'availability', label: '🚛 Availability Timeline' },
+                { id: 'downtime', label: '⚠️ Downtime Analysis' },
+                { id: 'tracking', label: '📅 Return Date Tracking' },
+                { id: 'leaderboard', label: '🏆 Driver Leaderboard' },
+                { id: 'revenue', label: '💰 Revenue Trend' },
+                { id: 'icscorecard', label: '🤝 IC Scorecard' },
+                { id: 'momcompare', label: '📊 Month Comparison' },
+                { id: 'roi', label: '🔧 Truck ROI' },
+              ].map(tab => (
+                <button
+                  key={tab.id}
+                  onClick={() => setActiveReport(tab.id)}
+                  className={`px-3 py-2 rounded-lg text-sm font-medium whitespace-nowrap transition-colors ${
+                    activeReport === tab.id
+                      ? 'bg-blue-100 text-blue-700'
+                      : 'text-gray-600 hover:bg-gray-100'
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* ===== OVERVIEW ===== */}
+          {activeReport === 'overview' && (
+            <div className="space-y-6">
+              {/* KPI Cards */}
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                <div className="bg-white rounded-lg shadow-sm p-4">
+                  <div className="text-sm text-gray-500 mb-1">Avg Active Trucks</div>
+                  <div className="text-2xl font-bold text-gray-800">{metrics.avgActive}</div>
+                  <div className="text-xs text-gray-400">of {truckIds.length} revenue trucks</div>
+                </div>
+                <div className="bg-white rounded-lg shadow-sm p-4">
+                  <div className="text-sm text-gray-500 mb-1">Fleet Utilization</div>
+                  <div className={`text-2xl font-bold ${parseFloat(metrics.utilizationRate) >= 80 ? 'text-green-600' : 'text-red-600'}`}>
+                    {metrics.utilizationRate}%
+                  </div>
+                  <div className="text-xs text-gray-400">target: 100%</div>
+                </div>
+                <div className="bg-white rounded-lg shadow-sm p-4">
+                  <div className="text-sm text-gray-500 mb-1">Total Downtime</div>
+                  <div className="text-2xl font-bold text-red-600">{metrics.totalDowntime}</div>
+                  <div className="text-xs text-gray-400">truck-days lost</div>
+                </div>
+                <div className="bg-white rounded-lg shadow-sm p-4">
+                  <div className="text-sm text-gray-500 mb-1">Opportunity Cost</div>
+                  <div className="text-2xl font-bold text-amber-600">${metrics.opportunityCost.toLocaleString()}</div>
+                  <div className="text-xs text-gray-400">lost revenue potential</div>
+                </div>
+              </div>
+
+              {/* Weekly Trend */}
+              <div className="bg-white rounded-lg shadow-sm p-6">
+                <h3 className="text-md font-semibold text-gray-800 mb-4">Fleet Availability by Week</h3>
+                <div className="space-y-3">
+                  {weeklyTrend.map((week, idx) => (
+                    <div key={idx} className="flex items-center gap-4">
+                      <div className="w-20 text-sm text-gray-600">{week.week}</div>
+                      <div className="flex-1 flex gap-1 h-6">
+                        <div
+                          className="bg-green-500 rounded-l"
+                          style={{ width: `${(parseFloat(week.avgActive) / truckIds.length) * 100}%` }}
+                          title={`${week.avgActive} active`}
+                        />
+                        <div
+                          className="bg-red-500 rounded-r"
+                          style={{ width: `${(parseFloat(week.avgDown) / truckIds.length) * 100}%` }}
+                          title={`${week.avgDown} down`}
+                        />
+                      </div>
+                      <div className="w-32 text-right text-sm">
+                        <span className="text-green-600 font-medium">{week.avgActive}</span>
+                        <span className="text-gray-400"> / </span>
+                        <span className="text-red-600">{week.avgDown}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div className="flex gap-4 mt-4 pt-3 border-t text-xs text-gray-500">
+                  <span className="flex items-center gap-1"><span className="w-3 h-3 bg-green-500 rounded"></span> Active</span>
+                  <span className="flex items-center gap-1"><span className="w-3 h-3 bg-red-500 rounded"></span> Down</span>
+                </div>
+              </div>
+
+              {/* Downtime Breakdown */}
+              <div className="bg-white rounded-lg shadow-sm p-6">
+                <h3 className="text-md font-semibold text-gray-800 mb-4">Opportunity Cost by Downtime Type</h3>
+                {downtimeBreakdown.length > 0 ? (
+                  <div className="space-y-3">
+                    {downtimeBreakdown.map((item, idx) => (
+                      <div key={idx} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                        <div className="flex items-center gap-3">
+                          <div className="w-4 h-4 rounded" style={{ backgroundColor: item.color }}></div>
+                          <span className="font-medium">{item.name}</span>
+                        </div>
+                        <div className="text-right">
+                          <div className="font-bold" style={{ color: item.color }}>${item.cost.toLocaleString()}</div>
+                          <div className="text-xs text-gray-500">{item.value} truck-days</div>
+                        </div>
+                      </div>
+                    ))}
+                    <div className="flex items-center justify-between p-3 bg-gray-100 rounded-lg font-semibold">
+                      <span>Total Opportunity Cost</span>
+                      <span className="text-red-600">${metrics.opportunityCost.toLocaleString()}</span>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-gray-500 text-center py-4">No downtime recorded in this period 🎉</p>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* ===== AVAILABILITY TIMELINE ===== */}
+          {activeReport === 'availability' && (
+            <div className="bg-white rounded-lg shadow-sm p-6">
+              <h3 className="text-md font-semibold text-gray-800 mb-2">Truck Availability Timeline</h3>
+              <p className="text-sm text-gray-500 mb-4">Each cell = one day. Left = most recent, right = oldest. Hover for details.</p>
+
+              <div className="space-y-2 overflow-x-auto">
+                {truckTimeline.map(truck => (
+                  <div key={truck.truckId} className="flex items-center gap-3 min-w-fit">
+                    <div className="w-16 text-right font-mono text-sm font-medium text-gray-700">
+                      #{truck.truckId}
+                    </div>
+                    <div className="flex gap-px">
+                      {truck.days.slice().reverse().map((day, i) => (
+                        <div
+                          key={i}
+                          className="w-3 h-6 rounded-sm cursor-pointer hover:opacity-75 transition-opacity"
+                          style={{ backgroundColor: STATUS_COLORS[day.status] || '#d1d5db' }}
+                          title={`${day.date}: ${day.status}${day.driver ? ` (${day.driver})` : ''}${day.notes ? ` - ${day.notes}` : ''}`}
+                        />
+                      ))}
+                    </div>
+                    <div className="w-24 text-right text-sm">
+                      <span className="text-green-600 font-medium">{truck.activeDays}</span>
+                      <span className="text-gray-400">/{truck.days.length}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Legend */}
+              <div className="flex flex-wrap gap-4 mt-6 pt-4 border-t">
+                {Object.entries(STATUS_COLORS).map(([status, color]) => (
+                  <div key={status} className="flex items-center gap-2 text-sm">
+                    <div className="w-4 h-4 rounded" style={{ backgroundColor: color }}></div>
+                    <span className="text-gray-600">{status}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* ===== DOWNTIME ANALYSIS ===== */}
+          {activeReport === 'downtime' && (
+            <div className="space-y-6">
+              <div className="bg-white rounded-lg shadow-sm p-6">
+                <h3 className="text-md font-semibold text-gray-800 mb-4">Downtime Impact by Truck</h3>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-gray-100">
+                      <tr>
+                        <th className="px-3 py-2 text-left">Truck</th>
+                        <th className="px-3 py-2 text-left">Current Status</th>
+                        <th className="px-3 py-2 text-center">Active Days</th>
+                        <th className="px-3 py-2 text-center">Down Days</th>
+                        <th className="px-3 py-2 text-right">Opportunity Cost</th>
+                        <th className="px-3 py-2 text-center">Utilization</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {truckTimeline
+                        .sort((a, b) => b.downDays - a.downDays)
+                        .map((truck, idx) => {
+                          const utilization = truck.days.length > 0 ? Math.round((truck.activeDays / truck.days.length) * 100) : 0;
+                          const oppCost = truck.downDays * DAILY_GOAL;
+
+                          return (
+                            <tr key={truck.truckId} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                              <td className="px-3 py-2">
+                                <span className="font-mono font-medium">#{truck.truckId}</span>
+                                {truck.currentDriver && (
+                                  <span className="text-gray-500 text-xs ml-2">{truck.currentDriver}</span>
+                                )}
+                              </td>
+                              <td className="px-3 py-2">
+                                <span
+                                  className="px-2 py-0.5 rounded text-xs font-medium"
+                                  style={{
+                                    backgroundColor: `${STATUS_COLORS[truck.currentStatus]}20`,
+                                    color: STATUS_COLORS[truck.currentStatus]
+                                  }}
+                                >
+                                  {truck.currentStatus || 'Unknown'}
+                                </span>
+                              </td>
+                              <td className="px-3 py-2 text-center text-green-600 font-medium">{truck.activeDays}</td>
+                              <td className="px-3 py-2 text-center">
+                                {truck.downDays > 0 ? (
+                                  <span className="text-red-600 font-medium">{truck.downDays}</span>
+                                ) : (
+                                  <span className="text-gray-400">0</span>
+                                )}
+                              </td>
+                              <td className="px-3 py-2 text-right">
+                                {oppCost > 0 ? (
+                                  <span className="text-red-600 font-medium">${oppCost.toLocaleString()}</span>
+                                ) : (
+                                  <span className="text-gray-400">—</span>
+                                )}
+                              </td>
+                              <td className="px-3 py-2">
+                                <div className="flex items-center justify-center gap-2">
+                                  <div className="w-16 h-2 bg-gray-200 rounded-full overflow-hidden">
+                                    <div
+                                      className="h-full rounded-full"
+                                      style={{
+                                        width: `${utilization}%`,
+                                        backgroundColor: utilization >= 90 ? '#22c55e' : utilization >= 70 ? '#f59e0b' : '#ef4444'
+                                      }}
+                                    />
+                                  </div>
+                                  <span className="text-xs text-gray-500 w-8">{utilization}%</span>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Primary Issue Callout */}
+              {metrics.totalDowntimeDays.nodriver > 0 && metrics.totalDowntimeDays.nodriver >= metrics.totalDowntimeDays.breakfix && (
+                <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+                  <div className="flex items-start gap-3">
+                    <span className="text-2xl">⚠️</span>
+                    <div>
+                      <h4 className="font-semibold text-amber-800">Primary Issue: Driver Recruiting</h4>
+                      <p className="text-amber-700 text-sm mt-1">
+                        {metrics.totalDowntimeDays.nodriver} truck-days lost to driver vacancies, representing{' '}
+                        <span className="font-bold">
+                          {Math.round((metrics.totalDowntimeDays.nodriver / metrics.totalDowntime) * 100)}%
+                        </span>{' '}
+                        of all downtime. Estimated opportunity cost:{' '}
+                        <span className="font-bold">${(metrics.totalDowntimeDays.nodriver * DAILY_GOAL).toLocaleString()}</span>
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ===== RETURN DATE TRACKING ===== */}
+          {activeReport === 'tracking' && (
+            <div className="space-y-6">
+              <div className="bg-white rounded-lg shadow-sm p-6">
+                <h3 className="text-md font-semibold text-gray-800 mb-2">Expected Return Date Tracking</h3>
+                <p className="text-sm text-gray-500 mb-4">
+                  Monitor trucks that are down and track whether return dates are being met or pushed out.
+                </p>
+
+                {trucksDown.length > 0 ? (
+                  <div className="space-y-4">
+                    {trucksDown.map(truck => (
+                      <div key={truck.truckId} className="bg-gray-50 rounded-lg p-4">
+                        <div className="flex items-center justify-between mb-3">
+                          <div className="flex items-center gap-3">
+                            <span className="font-mono font-bold text-lg">#{truck.truckId}</span>
+                            <span
+                              className="px-2 py-1 rounded text-sm font-medium"
+                              style={{
+                                backgroundColor: `${STATUS_COLORS[truck.currentStatus]}20`,
+                                color: STATUS_COLORS[truck.currentStatus]
+                              }}
+                            >
+                              {truck.currentStatus}
+                            </span>
+                          </div>
+                          <div className="text-right">
+                            <div className="text-sm text-gray-500">Days Down</div>
+                            <div className="text-2xl font-bold text-red-600">{truck.daysDown}</div>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-3 gap-4 text-sm">
+                          <div>
+                            <div className="text-gray-500">Down Since</div>
+                            <div className="font-medium">{truck.downStartDate || '—'}</div>
+                          </div>
+                          <div>
+                            <div className="text-gray-500">Expected Return</div>
+                            <div className="font-medium text-blue-600">{truck.expectedReturn || 'Not set'}</div>
+                          </div>
+                          <div>
+                            <div className="text-gray-500">Opportunity Cost</div>
+                            <div className="font-medium text-red-600">${truck.opportunityCost.toLocaleString()}</div>
+                          </div>
+                        </div>
+
+                        {/* Progress bar */}
+                        {truck.expectedReturn && (
+                          <div className="mt-4 pt-3 border-t border-gray-200">
+                            <div className="flex justify-between text-xs text-gray-500 mb-1">
+                              <span>Down: {truck.downStartDate}</span>
+                              <span>Return: {truck.expectedReturn}</span>
+                            </div>
+                            <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+                              <div
+                                className="h-full bg-red-500 rounded-full"
+                                style={{ width: `${Math.min((truck.daysDown / 45) * 100, 100)}%` }}
+                              />
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-center py-8 text-gray-500">
+                    <div className="text-4xl mb-2">🎉</div>
+                    <p>All trucks are currently active or spare. No return dates to track.</p>
+                  </div>
+                )}
+              </div>
+
+              {/* Info box */}
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                <div className="flex items-start gap-3">
+                  <span className="text-xl">💡</span>
+                  <div>
+                    <h4 className="font-semibold text-blue-800">Return Date Slippage Detection</h4>
+                    <p className="text-blue-700 text-sm mt-1">
+                      This report tracks when expected return dates get pushed out. As you log more daily snapshots,
+                      any changes to expected return dates will be flagged here, helping you identify patterns
+                      where estimates consistently slip.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ===== DRIVER LEADERBOARD ===== */}
+          {activeReport === 'leaderboard' && (
+            <div className="space-y-6">
+              <div className="bg-white rounded-lg shadow-sm p-6">
+                <h3 className="text-md font-semibold text-gray-800 mb-2">Driver Performance Leaderboard</h3>
+                <p className="text-sm text-gray-500 mb-4">
+                  Ranked by average daily revenue. Shows drivers who were active during the selected period.
+                </p>
+
+                {driverLeaderboard.length > 0 ? (
+                  <div className="space-y-3">
+                    {driverLeaderboard.map((driver, idx) => (
+                      <div
+                        key={driver.name}
+                        className={`flex items-center gap-4 p-4 rounded-lg ${
+                          idx === 0 ? 'bg-yellow-50 border border-yellow-200' :
+                          idx === 1 ? 'bg-gray-100 border border-gray-200' :
+                          idx === 2 ? 'bg-amber-50 border border-amber-200' :
+                          'bg-white border border-gray-100'
+                        }`}
+                      >
+                        <div className="flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center text-lg font-bold" style={{
+                          backgroundColor: idx === 0 ? '#fbbf24' : idx === 1 ? '#9ca3af' : idx === 2 ? '#d97706' : '#e5e7eb',
+                          color: idx < 3 ? 'white' : '#6b7280'
+                        }}>
+                          {idx + 1}
+                        </div>
+                        <div className="flex-1">
+                          <div className="font-semibold text-gray-800">{driver.name}</div>
+                          <div className="text-sm text-gray-500">
+                            {driver.daysActive} days active • Truck{driver.trucks.length > 1 ? 's' : ''}: #{driver.trucks.join(', #')}
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <div className="text-xl font-bold text-green-600">${driver.avgRevenue.toLocaleString()}</div>
+                          <div className="text-sm" style={{ color: driver.vsGoal >= 100 ? '#22c55e' : '#ef4444' }}>
+                            {driver.vsGoal}% of ${DAILY_GOAL} goal
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-center py-8 text-gray-500">
+                    <div className="text-4xl mb-2">👤</div>
+                    <p>No driver data available for this period.</p>
+                  </div>
+                )}
+              </div>
+
+              {/* Summary stats */}
+              {driverLeaderboard.length > 0 && (
+                <div className="grid grid-cols-3 gap-4">
+                  <div className="bg-white rounded-lg shadow-sm p-4 text-center">
+                    <div className="text-sm text-gray-500 mb-1">Top Performer</div>
+                    <div className="font-bold text-gray-800">{driverLeaderboard[0]?.name}</div>
+                    <div className="text-sm text-green-600">${driverLeaderboard[0]?.avgRevenue}/day avg</div>
+                  </div>
+                  <div className="bg-white rounded-lg shadow-sm p-4 text-center">
+                    <div className="text-sm text-gray-500 mb-1">Fleet Avg Revenue</div>
+                    <div className="font-bold text-gray-800">
+                      ${Math.round(driverLeaderboard.reduce((s, d) => s + d.avgRevenue, 0) / driverLeaderboard.length).toLocaleString()}
+                    </div>
+                    <div className="text-sm text-gray-500">per driver per day</div>
+                  </div>
+                  <div className="bg-white rounded-lg shadow-sm p-4 text-center">
+                    <div className="text-sm text-gray-500 mb-1">Drivers Above Goal</div>
+                    <div className="font-bold text-green-600">
+                      {driverLeaderboard.filter(d => d.vsGoal >= 100).length} / {driverLeaderboard.length}
+                    </div>
+                    <div className="text-sm text-gray-500">meeting ${DAILY_GOAL}/day</div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ===== REVENUE TREND ===== */}
+          {activeReport === 'revenue' && (
+            <div className="space-y-6">
+              {/* KPI Cards */}
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                <div className="bg-white rounded-lg shadow-sm p-4">
+                  <div className="text-sm text-gray-500 mb-1">Total Revenue</div>
+                  <div className="text-2xl font-bold text-green-600">${revenueStats.total.toLocaleString()}</div>
+                  <div className="text-xs text-gray-400">{dateRange} day period</div>
+                </div>
+                <div className="bg-white rounded-lg shadow-sm p-4">
+                  <div className="text-sm text-gray-500 mb-1">Daily Average</div>
+                  <div className="text-2xl font-bold text-gray-800">${revenueStats.avg.toLocaleString()}</div>
+                  <div className="text-xs text-gray-400">per day</div>
+                </div>
+                <div className="bg-white rounded-lg shadow-sm p-4">
+                  <div className="text-sm text-gray-500 mb-1">Goal Achievement</div>
+                  <div className={`text-2xl font-bold ${revenueStats.goalAchievement >= 100 ? 'text-green-600' : 'text-amber-600'}`}>
+                    {revenueStats.goalAchievement}%
+                  </div>
+                  <div className="text-xs text-gray-400">vs ${DAILY_GOAL}/truck target</div>
+                </div>
+                <div className="bg-white rounded-lg shadow-sm p-4">
+                  <div className="text-sm text-gray-500 mb-1">Best Day</div>
+                  <div className="text-2xl font-bold text-blue-600">${revenueStats.bestDay?.totalRevenue.toLocaleString() || 0}</div>
+                  <div className="text-xs text-gray-400">{revenueStats.bestDay?.displayDate || '—'}</div>
+                </div>
+              </div>
+
+              {/* Revenue Chart (simplified bar chart) */}
+              <div className="bg-white rounded-lg shadow-sm p-6">
+                <h3 className="text-md font-semibold text-gray-800 mb-4">Daily Revenue Trend</h3>
+                <div className="space-y-2 max-h-96 overflow-y-auto">
+                  {revenueTrend.map((day, idx) => {
+                    const maxRevenue = Math.max(...revenueTrend.map(d => d.totalRevenue), 1);
+                    const pct = (day.totalRevenue / maxRevenue) * 100;
+                    const isAboveGoal = day.totalRevenue >= day.goal;
+
+                    return (
+                      <div key={day.date} className="flex items-center gap-3">
+                        <div className="w-16 text-sm text-gray-500 text-right">{day.displayDate}</div>
+                        <div className="flex-1 h-6 bg-gray-100 rounded-full overflow-hidden relative">
+                          <div
+                            className={`h-full rounded-full transition-all ${isAboveGoal ? 'bg-green-500' : 'bg-amber-500'}`}
+                            style={{ width: `${pct}%` }}
+                          />
+                          {/* Goal line */}
+                          <div
+                            className="absolute top-0 bottom-0 w-0.5 bg-red-400"
+                            style={{ left: `${(day.goal / maxRevenue) * 100}%` }}
+                            title={`Goal: $${day.goal.toLocaleString()}`}
+                          />
+                        </div>
+                        <div className="w-24 text-right">
+                          <span className={`font-medium ${isAboveGoal ? 'text-green-600' : 'text-amber-600'}`}>
+                            ${day.totalRevenue.toLocaleString()}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="flex gap-4 mt-4 pt-3 border-t text-xs text-gray-500">
+                  <span className="flex items-center gap-1"><span className="w-3 h-3 bg-green-500 rounded"></span> Above Goal</span>
+                  <span className="flex items-center gap-1"><span className="w-3 h-3 bg-amber-500 rounded"></span> Below Goal</span>
+                  <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-red-400"></span> Daily Goal Line</span>
+                </div>
+              </div>
+
+              {/* Weekly Summary */}
+              <div className="bg-white rounded-lg shadow-sm p-6">
+                <h3 className="text-md font-semibold text-gray-800 mb-4">Weekly Revenue Summary</h3>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-gray-100">
+                      <tr>
+                        <th className="px-3 py-2 text-left">Week</th>
+                        <th className="px-3 py-2 text-right">Total Revenue</th>
+                        <th className="px-3 py-2 text-right">Avg Active Trucks</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {weeklyTrend.map((week, idx) => (
+                        <tr key={idx} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                          <td className="px-3 py-2 font-medium">{week.week}</td>
+                          <td className="px-3 py-2 text-right text-green-600 font-medium">
+                            ${week.totalRevenue.toLocaleString()}
+                          </td>
+                          <td className="px-3 py-2 text-right">{week.avgActive}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ===== IC CARRIER SCORECARD ===== */}
+          {activeReport === 'icscorecard' && (
+            <div className="space-y-6">
+              <div className="bg-white rounded-lg shadow-sm p-6">
+                <h3 className="text-md font-semibold text-gray-800 mb-2">IC / Carrier Performance Scorecard</h3>
+                <p className="text-sm text-gray-500 mb-4">
+                  Track independent contractor and carrier partners. Ranked by total revenue contribution.
+                </p>
+
+                {icScorecard.length > 0 ? (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-gray-100">
+                        <tr>
+                          <th className="px-3 py-2 text-left">Carrier / IC</th>
+                          <th className="px-3 py-2 text-left">Type</th>
+                          <th className="px-3 py-2 text-center">Days Worked</th>
+                          <th className="px-3 py-2 text-center">Avg Loads/Day</th>
+                          <th className="px-3 py-2 text-right">Avg Rev/Day</th>
+                          <th className="px-3 py-2 text-right">Total Revenue</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {icScorecard.map((ic, idx) => (
+                          <tr key={ic.name} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                            <td className="px-3 py-2">
+                              <span className="font-medium">{ic.name}</span>
+                              {idx === 0 && <span className="ml-2 text-yellow-500">⭐</span>}
+                            </td>
+                            <td className="px-3 py-2 text-gray-500">
+                              {ic.truckTypes.length > 0 ? ic.truckTypes.join(', ') : '—'}
+                            </td>
+                            <td className="px-3 py-2 text-center">{ic.daysWorked}</td>
+                            <td className="px-3 py-2 text-center">{ic.avgLoadsPerDay}</td>
+                            <td className="px-3 py-2 text-right text-gray-600">
+                              ${ic.avgRevenuePerDay.toLocaleString()}
+                            </td>
+                            <td className="px-3 py-2 text-right font-medium text-green-600">
+                              ${ic.totalRevenue.toLocaleString()}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                      <tfoot className="bg-gray-100">
+                        <tr>
+                          <td className="px-3 py-2 font-semibold" colSpan="5">Total IC Revenue</td>
+                          <td className="px-3 py-2 text-right font-bold text-green-600">
+                            ${icScorecard.reduce((s, ic) => s + ic.totalRevenue, 0).toLocaleString()}
+                          </td>
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="text-center py-8 text-gray-500">
+                    <div className="text-4xl mb-2">🤝</div>
+                    <p>No IC/carrier data recorded for this period.</p>
+                  </div>
+                )}
+              </div>
+
+              {/* IC Summary */}
+              {icScorecard.length > 0 && (
+                <div className="grid grid-cols-3 gap-4">
+                  <div className="bg-white rounded-lg shadow-sm p-4 text-center">
+                    <div className="text-sm text-gray-500 mb-1">Active ICs/Carriers</div>
+                    <div className="text-2xl font-bold text-gray-800">{icScorecard.length}</div>
+                    <div className="text-sm text-gray-500">partners</div>
+                  </div>
+                  <div className="bg-white rounded-lg shadow-sm p-4 text-center">
+                    <div className="text-sm text-gray-500 mb-1">Top Performer</div>
+                    <div className="font-bold text-gray-800">{icScorecard[0]?.name}</div>
+                    <div className="text-sm text-green-600">${icScorecard[0]?.totalRevenue.toLocaleString()}</div>
+                  </div>
+                  <div className="bg-white rounded-lg shadow-sm p-4 text-center">
+                    <div className="text-sm text-gray-500 mb-1">IC Revenue Share</div>
+                    <div className="text-2xl font-bold text-blue-600">
+                      {revenueStats.total > 0
+                        ? Math.round((icScorecard.reduce((s, ic) => s + ic.totalRevenue, 0) / revenueStats.total) * 100)
+                        : 0}%
+                    </div>
+                    <div className="text-sm text-gray-500">of total revenue</div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ===== MONTH-OVER-MONTH COMPARISON ===== */}
+          {activeReport === 'momcompare' && (
+            <div className="space-y-6">
+              <div className="bg-white rounded-lg shadow-sm p-6">
+                <h3 className="text-md font-semibold text-gray-800 mb-2">Month-over-Month Comparison</h3>
+                <p className="text-sm text-gray-500 mb-4">
+                  Compare performance metrics across months to identify trends and seasonal patterns.
+                </p>
+
+                {monthlyComparison.length > 0 ? (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-gray-100">
+                        <tr>
+                          <th className="px-3 py-2 text-left">Month</th>
+                          <th className="px-3 py-2 text-center">Days</th>
+                          <th className="px-3 py-2 text-right">Total Revenue</th>
+                          <th className="px-3 py-2 text-right">Avg Daily Rev</th>
+                          <th className="px-3 py-2 text-center">Utilization</th>
+                          <th className="px-3 py-2 text-right">Opp. Cost</th>
+                          <th className="px-3 py-2 text-center">MoM Change</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {monthlyComparison.map((month, idx) => (
+                          <tr key={month.month} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                            <td className="px-3 py-2 font-medium">{month.displayMonth}</td>
+                            <td className="px-3 py-2 text-center text-gray-500">{month.days}</td>
+                            <td className="px-3 py-2 text-right font-medium text-green-600">
+                              ${month.totalRevenue.toLocaleString()}
+                            </td>
+                            <td className="px-3 py-2 text-right">${month.avgDailyRevenue.toLocaleString()}</td>
+                            <td className="px-3 py-2 text-center">
+                              <div className="flex items-center justify-center gap-2">
+                                <div className="w-16 h-2 bg-gray-200 rounded-full overflow-hidden">
+                                  <div
+                                    className="h-full rounded-full"
+                                    style={{
+                                      width: `${month.utilization}%`,
+                                      backgroundColor: month.utilization >= 85 ? '#22c55e' : month.utilization >= 70 ? '#f59e0b' : '#ef4444'
+                                    }}
+                                  />
+                                </div>
+                                <span className="text-xs">{month.utilization}%</span>
+                              </div>
+                            </td>
+                            <td className="px-3 py-2 text-right text-red-600">
+                              ${month.opportunityCost.toLocaleString()}
+                            </td>
+                            <td className="px-3 py-2 text-center">
+                              {month.revenueChange !== null ? (
+                                <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
+                                  month.revenueChange > 0 ? 'bg-green-100 text-green-700' :
+                                  month.revenueChange < 0 ? 'bg-red-100 text-red-700' :
+                                  'bg-gray-100 text-gray-700'
+                                }`}>
+                                  {month.revenueChange > 0 ? '↑' : month.revenueChange < 0 ? '↓' : '→'}
+                                  {Math.abs(month.revenueChange)}%
+                                </span>
+                              ) : (
+                                <span className="text-gray-400">—</span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="text-center py-8 text-gray-500">
+                    <div className="text-4xl mb-2">📅</div>
+                    <p>Need data from multiple months to show comparison.</p>
+                  </div>
+                )}
+              </div>
+
+              {/* Trend Insight */}
+              {monthlyComparison.length >= 2 && (
+                <div className={`rounded-lg p-4 ${
+                  monthlyComparison[monthlyComparison.length - 1]?.revenueChange > 0
+                    ? 'bg-green-50 border border-green-200'
+                    : 'bg-amber-50 border border-amber-200'
+                }`}>
+                  <div className="flex items-start gap-3">
+                    <span className="text-2xl">
+                      {monthlyComparison[monthlyComparison.length - 1]?.revenueChange > 0 ? '📈' : '📉'}
+                    </span>
+                    <div>
+                      <h4 className={`font-semibold ${
+                        monthlyComparison[monthlyComparison.length - 1]?.revenueChange > 0
+                          ? 'text-green-800'
+                          : 'text-amber-800'
+                      }`}>
+                        {monthlyComparison[monthlyComparison.length - 1]?.revenueChange > 0
+                          ? 'Revenue Growing'
+                          : 'Revenue Declining'}
+                      </h4>
+                      <p className={`text-sm mt-1 ${
+                        monthlyComparison[monthlyComparison.length - 1]?.revenueChange > 0
+                          ? 'text-green-700'
+                          : 'text-amber-700'
+                      }`}>
+                        Latest month shows {Math.abs(monthlyComparison[monthlyComparison.length - 1]?.revenueChange || 0)}%
+                        {monthlyComparison[monthlyComparison.length - 1]?.revenueChange > 0 ? ' increase' : ' decrease'}
+                        in average daily revenue compared to the previous month.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ===== TRUCK ROI ANALYSIS ===== */}
+          {activeReport === 'roi' && (
+            <div className="space-y-6">
+              <div className="bg-white rounded-lg shadow-sm p-6">
+                <h3 className="text-md font-semibold text-gray-800 mb-2">Truck ROI Analysis</h3>
+                <p className="text-sm text-gray-500 mb-4">
+                  Evaluate each truck's return on investment. ROI Score combines utilization (60%) and revenue performance (40%).
+                </p>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-gray-100">
+                      <tr>
+                        <th className="px-3 py-2 text-left">Truck</th>
+                        <th className="px-3 py-2 text-left">Status</th>
+                        <th className="px-3 py-2 text-center">ROI Score</th>
+                        <th className="px-3 py-2 text-center">Utilization</th>
+                        <th className="px-3 py-2 text-right">Avg Rev/Day</th>
+                        <th className="px-3 py-2 text-right">Total Revenue</th>
+                        <th className="px-3 py-2 text-right">Opp. Cost</th>
+                        <th className="px-3 py-2 text-right">Net Contribution</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {truckROI.map((truck, idx) => (
+                        <tr key={truck.truckId} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                          <td className="px-3 py-2">
+                            <span className="font-mono font-medium">#{truck.truckId}</span>
+                            {truck.currentDriver && (
+                              <span className="text-gray-500 text-xs ml-2">{truck.currentDriver}</span>
+                            )}
+                          </td>
+                          <td className="px-3 py-2">
+                            <span
+                              className="px-2 py-0.5 rounded text-xs font-medium"
+                              style={{
+                                backgroundColor: `${STATUS_COLORS[truck.currentStatus]}20`,
+                                color: STATUS_COLORS[truck.currentStatus]
+                              }}
+                            >
+                              {truck.currentStatus || 'Unknown'}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2 text-center">
+                            <div className="inline-flex items-center justify-center w-12 h-12 rounded-full font-bold text-white" style={{
+                              backgroundColor: truck.roiScore >= 80 ? '#22c55e' :
+                                              truck.roiScore >= 60 ? '#f59e0b' :
+                                              truck.roiScore >= 40 ? '#ef4444' : '#9ca3af'
+                            }}>
+                              {truck.roiScore}
+                            </div>
+                          </td>
+                          <td className="px-3 py-2 text-center">
+                            <div className="flex items-center justify-center gap-2">
+                              <div className="w-16 h-2 bg-gray-200 rounded-full overflow-hidden">
+                                <div
+                                  className="h-full rounded-full"
+                                  style={{
+                                    width: `${truck.utilization}%`,
+                                    backgroundColor: truck.utilization >= 90 ? '#22c55e' : truck.utilization >= 70 ? '#f59e0b' : '#ef4444'
+                                  }}
+                                />
+                              </div>
+                              <span className="text-xs w-8">{truck.utilization}%</span>
+                            </div>
+                          </td>
+                          <td className="px-3 py-2 text-right">
+                            {truck.avgDailyRevenue > 0 ? (
+                              <span className={truck.avgDailyRevenue >= DAILY_GOAL ? 'text-green-600' : 'text-amber-600'}>
+                                ${truck.avgDailyRevenue.toLocaleString()}
+                              </span>
+                            ) : (
+                              <span className="text-gray-400">—</span>
+                            )}
+                          </td>
+                          <td className="px-3 py-2 text-right font-medium text-green-600">
+                            ${truck.totalRevenue.toLocaleString()}
+                          </td>
+                          <td className="px-3 py-2 text-right text-red-600">
+                            {truck.opportunityCost > 0 ? `-$${truck.opportunityCost.toLocaleString()}` : '—'}
+                          </td>
+                          <td className="px-3 py-2 text-right font-bold" style={{
+                            color: truck.netContribution >= 0 ? '#22c55e' : '#ef4444'
+                          }}>
+                            {truck.netContribution >= 0 ? '' : '-'}${Math.abs(truck.netContribution).toLocaleString()}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot className="bg-gray-100">
+                      <tr>
+                        <td className="px-3 py-2 font-semibold" colSpan="5">Fleet Totals</td>
+                        <td className="px-3 py-2 text-right font-bold text-green-600">
+                          ${truckROI.reduce((s, t) => s + t.totalRevenue, 0).toLocaleString()}
+                        </td>
+                        <td className="px-3 py-2 text-right font-bold text-red-600">
+                          -${truckROI.reduce((s, t) => s + t.opportunityCost, 0).toLocaleString()}
+                        </td>
+                        <td className="px-3 py-2 text-right font-bold" style={{
+                          color: truckROI.reduce((s, t) => s + t.netContribution, 0) >= 0 ? '#22c55e' : '#ef4444'
+                        }}>
+                          ${truckROI.reduce((s, t) => s + t.netContribution, 0).toLocaleString()}
+                        </td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              </div>
+
+              {/* ROI Insights */}
+              <div className="grid grid-cols-2 gap-4">
+                <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+                  <h4 className="font-semibold text-green-800 mb-2">🏆 Top Performers</h4>
+                  <div className="space-y-2">
+                    {truckROI.slice(0, 3).map((truck, idx) => (
+                      <div key={truck.truckId} className="flex justify-between text-sm">
+                        <span className="text-green-700">#{truck.truckId}</span>
+                        <span className="font-medium text-green-800">ROI: {truck.roiScore}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+                  <h4 className="font-semibold text-red-800 mb-2">⚠️ Needs Attention</h4>
+                  <div className="space-y-2">
+                    {truckROI.slice(-3).reverse().map((truck, idx) => (
+                      <div key={truck.truckId} className="flex justify-between text-sm">
+                        <span className="text-red-700">#{truck.truckId}</span>
+                        <span className="font-medium text-red-800">ROI: {truck.roiScore}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ============================================
     // MAIN DASHBOARD COMPONENT
     // ============================================
     function CTLDashboard() {
@@ -1241,6 +2478,7 @@
                   { id: 'ic', label: 'ICs / Carriers' },
                   { id: 'status', label: 'Status' },
                   { id: 'settings', label: 'Settings' },
+                  { id: 'reports', label: 'Reports' },
                 ].map(tab => (
                   <button key={tab.id} onClick={() => setActiveTab(tab.id)}
                     className={`text-sm font-medium pb-2 whitespace-nowrap ${activeTab === tab.id ? 'text-white border-b-2 border-white' : 'text-blue-300 hover:text-white'}`}>
@@ -1854,6 +3092,17 @@
                   + Add Truck
                 </button>
               </div>
+            )}
+
+            {/* ==================== REPORTS TAB ==================== */}
+            {activeTab === 'reports' && (
+              <ReportsTab
+                dailyLogs={dailyLogs}
+                fleet={fleet}
+                goals={goals}
+                truckStatus={truckStatus}
+                truckExpectedReturn={truckExpectedReturn}
+              />
             )}
 
             {/* ==================== SETTINGS TAB ==================== */}
