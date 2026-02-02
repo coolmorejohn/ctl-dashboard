@@ -756,22 +756,22 @@
             </div>
 
             {/* Sub-tabs */}
-            <div className="flex gap-1 mt-4 pt-3 border-t overflow-x-auto">
+            <div className="flex flex-wrap gap-1 mt-4 pt-3 border-t">
               {[
                 { id: 'overview', label: '📈 Overview' },
-                { id: 'availability', label: '🚛 Availability Timeline' },
-                { id: 'downtime', label: '⚠️ Downtime Analysis' },
-                { id: 'tracking', label: '📅 Return Date Tracking' },
-                { id: 'leaderboard', label: '🏆 Driver Leaderboard' },
-                { id: 'revenue', label: '💰 Revenue Trend' },
-                { id: 'icscorecard', label: '🤝 IC Scorecard' },
-                { id: 'momcompare', label: '📊 Month Comparison' },
-                { id: 'roi', label: '🔧 Truck ROI' },
+                { id: 'availability', label: '🚛 Availability' },
+                { id: 'downtime', label: '⚠️ Downtime' },
+                { id: 'tracking', label: '📅 Return Dates' },
+                { id: 'leaderboard', label: '🏆 Drivers' },
+                { id: 'revenue', label: '💰 Revenue' },
+                { id: 'icscorecard', label: '🤝 ICs' },
+                { id: 'momcompare', label: '📊 MoM' },
+                { id: 'roi', label: '🔧 ROI' },
               ].map(tab => (
                 <button
                   key={tab.id}
                   onClick={() => setActiveReport(tab.id)}
-                  className={`px-3 py-2 rounded-lg text-sm font-medium whitespace-nowrap transition-colors ${
+                  className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
                     activeReport === tab.id
                       ? 'bg-blue-100 text-blue-700'
                       : 'text-gray-600 hover:bg-gray-100'
@@ -1640,8 +1640,12 @@
       // Confirmation modal state
       const [confirmModal, setConfirmModal] = useState({ isOpen: false, truckIndex: null, truckId: '' });
 
-      // Report date
-      const [reportDate, setReportDate] = useState(() => new Date().toISOString().split('T')[0]);
+      // Report date - use Central Time
+      const getCentralDate = () => {
+        const now = new Date();
+        return now.toLocaleDateString('en-CA', { timeZone: 'America/Chicago' }); // en-CA gives YYYY-MM-DD format
+      };
+      const [reportDate, setReportDate] = useState(getCentralDate);
       const reportMonth = useMemo(() => {
         const d = new Date(reportDate);
         return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
@@ -1741,6 +1745,17 @@
         }
         loadData();
       }, []);
+
+      // Set report date to most recent log date when dailyLogs loads
+      useEffect(() => {
+        if (dailyLogs && dailyLogs.length > 0) {
+          // dailyLogs are sorted oldest to newest, so get the last one
+          const mostRecentLog = dailyLogs[dailyLogs.length - 1];
+          if (mostRecentLog && mostRecentLog.date) {
+            setReportDate(mostRecentLog.date);
+          }
+        }
+      }, [dailyLogs]);
 
       // ============================================
       // HELPER: Get truck's monthly plan
