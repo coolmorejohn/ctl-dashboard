@@ -77,13 +77,13 @@
         return response.json();
       },
 
-      // Helper: Write large data in chunks (SEQUENTIAL with batched parallelism)
-      // Google Apps Script can't handle too many concurrent requests, so we process in small batches
+      // Helper: Write large data in chunks (SEQUENTIAL)
+      // Google Apps Script URL limit is ~2048 chars, so we use very small chunks
       async writeChunked(sheetName, dataObj) {
-        // For Shipments/DailyLogs: split into chunks of 5 items each
+        // For Shipments/DailyLogs: split into chunks of 1 item each (to stay under URL limit)
         const isShipments = dataObj.shipments !== undefined;
         const items = isShipments ? (dataObj.shipments || []) : (Array.isArray(dataObj) ? dataObj : []);
-        const chunkSize = 5;
+        const chunkSize = 1; // 1 item per chunk to stay under 2048 char URL limit
         const chunks = [];
 
         for (let i = 0; i < items.length; i += chunkSize) {
