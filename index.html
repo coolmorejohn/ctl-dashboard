@@ -120,6 +120,11 @@
           if (result.error) throw new Error(`Server error on chunk ${i + 1}: ${result.error}`);
 
           console.log(`Chunk ${i + 1}/${chunks.length} written`, result);
+
+          // Small delay between chunks to avoid rate limiting (300ms)
+          if (i < chunks.length - 1) {
+            await new Promise(resolve => setTimeout(resolve, 300));
+          }
         }
 
         console.log(`All ${chunks.length} chunks written successfully`);
@@ -1012,17 +1017,29 @@
         }
         setDailyLogs(newLogs);
 
-        // Save all data
+        // Save all data SEQUENTIALLY to avoid Google Apps Script rate limiting
+        // IMPORTANT: Do NOT use Promise.all here - it causes concurrent requests that trigger 400/CORS errors
         const statusData = { status: truckStatus, expectedReturn: truckExpectedReturn };
         const shipmentsData = { dataDate: shipmentsDataDate || reportDate, shipments };
 
-        await Promise.all([
-          SheetsDB.write('Fleet', fleet, reportDate),
-          SheetsDB.write('TruckStatus', statusData, reportDate),
-          SheetsDB.write('Shipments', shipmentsData, reportDate),
-          SheetsDB.write('DailyLogs', newLogs, reportDate),
-          SheetsDB.write('MonthlyPlan', monthlyPlan, reportDate),
-        ]);
+        // Small data first (single request each), then chunked data
+        console.log('Saving Fleet...');
+        await SheetsDB.write('Fleet', fleet, reportDate);
+
+        console.log('Saving TruckStatus...');
+        await SheetsDB.write('TruckStatus', statusData, reportDate);
+
+        console.log('Saving MonthlyPlan...');
+        await SheetsDB.write('MonthlyPlan', monthlyPlan, reportDate);
+
+        // Chunked data last - these send multiple requests each
+        console.log('Saving Shipments...');
+        await SheetsDB.write('Shipments', shipmentsData, reportDate);
+
+        console.log('Saving DailyLogs...');
+        await SheetsDB.write('DailyLogs', newLogs, reportDate);
+
+        console.log('All saves complete!');
 
         const connected = await SheetsDB.checkConnection();
         setConnectionStatus(connected ? 'connected' : 'offline');
