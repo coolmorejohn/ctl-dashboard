@@ -77,47 +77,57 @@
         return response.json();
       },
 
-      // Helper: Write large data in chunks
+      // Helper: Write large data in chunks (PARALLEL for speed)
       async writeChunked(sheetName, dataObj) {
-        // For Shipments: { dataDate, shipments: [...] }
-        // Split shipments array into chunks of 5 items each (URLs have ~8000 char limit)
-        const shipments = dataObj.shipments || [];
+        // For Shipments/DailyLogs: split into chunks of 5 items
+        const isShipments = dataObj.shipments !== undefined;
+        const items = isShipments ? (dataObj.shipments || []) : (Array.isArray(dataObj) ? dataObj : []);
         const chunkSize = 5;
         const chunks = [];
 
-        for (let i = 0; i < shipments.length; i += chunkSize) {
-          chunks.push(shipments.slice(i, i + chunkSize));
+        for (let i = 0; i < items.length; i += chunkSize) {
+          chunks.push(items.slice(i, i + chunkSize));
         }
 
-        console.log(`Writing ${sheetName} in ${chunks.length} chunks...`);
+        console.log(`Writing ${sheetName} in ${chunks.length} chunks (parallel)...`);
 
-        // Write first chunk with metadata (overwrites sheet)
-        const firstPayload = {
-          action: 'write',
-          sheet: sheetName,
-          data: { dataDate: dataObj.dataDate, shipments: chunks[0] || [], totalChunks: chunks.length }
-        };
-        const firstEncoded = encodeURIComponent(JSON.stringify(firstPayload));
-        const firstUrl = `${SCRIPT_URL}?payload=${firstEncoded}&t=${Date.now()}`;
-        const firstResponse = await fetch(firstUrl);
-        if (!firstResponse.ok) throw new Error(`HTTP ${firstResponse.status}`);
-        const firstResult = await firstResponse.json();
-        console.log(`Chunk 1/${chunks.length} written:`, firstResult);
+        // Build all requests
+        const requests = chunks.map((chunk, i) => {
+          const isFirst = i === 0;
+          let payload;
 
-        // Append remaining chunks
-        for (let i = 1; i < chunks.length; i++) {
-          const chunkPayload = {
-            action: 'appendChunk',
-            sheet: sheetName,
-            data: chunks[i],
-            chunkIndex: i
-          };
-          const chunkEncoded = encodeURIComponent(JSON.stringify(chunkPayload));
-          const chunkUrl = `${SCRIPT_URL}?payload=${chunkEncoded}&t=${Date.now()}`;
-          const chunkResponse = await fetch(chunkUrl);
-          if (!chunkResponse.ok) throw new Error(`HTTP ${chunkResponse.status} on chunk ${i+1}`);
-          const chunkResult = await chunkResponse.json();
-          console.log(`Chunk ${i+1}/${chunks.length} written:`, chunkResult);
+          if (isFirst) {
+            // First chunk includes metadata
+            if (isShipments) {
+              payload = { action: 'write', sheet: sheetName, data: { dataDate: dataObj.dataDate, shipments: chunk, totalChunks: chunks.length } };
+            } else {
+              payload = { action: 'write', sheet: sheetName, data: { items: chunk, totalChunks: chunks.length } };
+            }
+          } else {
+            payload = { action: 'appendChunk', sheet: sheetName, data: chunk, chunkIndex: i };
+          }
+
+          const encoded = encodeURIComponent(JSON.stringify(payload));
+          const url = `${SCRIPT_URL}?payload=${encoded}&t=${Date.now()}&c=${i}`;
+          return { url, index: i };
+        });
+
+        // Fire first request, wait for it (clears the sheet)
+        const firstReq = requests[0];
+        const firstResponse = await fetch(firstReq.url);
+        if (!firstResponse.ok) throw new Error(`HTTP ${firstResponse.status} on chunk 1`);
+        console.log(`Chunk 1/${chunks.length} written`);
+
+        // Fire all remaining requests in PARALLEL
+        if (requests.length > 1) {
+          const remainingPromises = requests.slice(1).map(async (req) => {
+            const response = await fetch(req.url);
+            if (!response.ok) throw new Error(`HTTP ${response.status} on chunk ${req.index + 1}`);
+            return req.index;
+          });
+
+          await Promise.all(remainingPromises);
+          console.log(`Chunks 2-${chunks.length} written (parallel)`);
         }
 
         return { success: true, chunks: chunks.length };
@@ -149,20 +159,29 @@
         if (reportDate) payload.reportDate = reportDate;
         const payloadStr = JSON.stringify(payload);
 
-        // Use chunked writes for Shipments only (has shipments array)
-        if (sheetName === 'Shipments' && data.shipments && payloadStr.length > 4000) {
-          try {
-            const result = await this.writeChunked(sheetName, data);
-            console.log(`Sheets chunked write result for ${sheetName}:`, result);
-            return { success: true, synced: true, method: 'CHUNKED' };
-          } catch (error) {
-            console.warn(`Sheets chunked write failed for ${sheetName}:`, error.message);
-            return { success: false, synced: false, error: error.message };
-          }
-        }
-
-        // For DailyLogs or other large data, just save to localStorage only (can't sync large arrays via GET)
+        // Use chunked writes for Shipments (has shipments array) or DailyLogs (array of logs)
         if (payloadStr.length > 4000) {
+          if (sheetName === 'Shipments' && data.shipments) {
+            try {
+              const result = await this.writeChunked(sheetName, data);
+              console.log(`Sheets chunked write result for ${sheetName}:`, result);
+              return { success: true, synced: true, method: 'CHUNKED' };
+            } catch (error) {
+              console.warn(`Sheets chunked write failed for ${sheetName}:`, error.message);
+              return { success: false, synced: false, error: error.message };
+            }
+          }
+          if (sheetName === 'DailyLogs' && Array.isArray(data)) {
+            try {
+              const result = await this.writeChunked(sheetName, data);
+              console.log(`Sheets chunked write result for ${sheetName}:`, result);
+              return { success: true, synced: true, method: 'CHUNKED' };
+            } catch (error) {
+              console.warn(`Sheets chunked write failed for ${sheetName}:`, error.message);
+              return { success: false, synced: false, error: error.message };
+            }
+          }
+          // Other large data - localStorage only
           console.warn(`${sheetName} too large for GET sync (${payloadStr.length} chars), saved to localStorage only`);
           return { success: true, synced: false, method: 'LOCAL_ONLY', reason: 'payload too large' };
         }
