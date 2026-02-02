@@ -86,16 +86,18 @@
       },
 
       async write(sheetName, data, reportDate = null) {
+        // Always save to localStorage first
         localStorage.setItem(`CTL_${sheetName}`, JSON.stringify(data));
         try {
+          // Use GET with encoded data for Google Apps Script CORS compatibility
           const payload = { action: 'write', sheet: sheetName, data };
           if (reportDate) payload.reportDate = reportDate;
-          const response = await fetch(SCRIPT_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'text/plain' },
-            body: JSON.stringify(payload)
-          });
+          const encodedData = encodeURIComponent(JSON.stringify(payload));
+          const url = `${SCRIPT_URL}?payload=${encodedData}&t=${Date.now()}`;
+          const response = await fetch(url);
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const result = await response.json();
+          console.log(`Sheets write result for ${sheetName}:`, result);
           return { success: true, synced: true };
         } catch (error) {
           console.warn(`Sheets write failed for ${sheetName}:`, error.message);
