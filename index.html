@@ -77,21 +77,33 @@
         return response.json();
       },
 
-      // Helper: Write large data in chunks (SEQUENTIAL)
+      // Helper: POST data to Google Apps Script (avoids URL length limits)
+      async postToSheets(payload) {
+        const response = await fetch(SCRIPT_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain' },
+          body: JSON.stringify(payload)
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      },
+
+      // Helper: Write large data in chunks (SEQUENTIAL via POST)
       async writeChunked(sheetName, dataObj) {
-        // For Shipments/DailyLogs: split into chunks of 5 items each
+        // For Shipments/DailyLogs: split into chunks of 10 items each
+        // Using POST to avoid URL length limits (GET limited to ~2048 chars)
         const isShipments = dataObj.shipments !== undefined;
         const items = isShipments ? (dataObj.shipments || []) : (Array.isArray(dataObj) ? dataObj : []);
-        const chunkSize = 5;
+        const chunkSize = 10;  // Can be larger with POST (no URL limit)
         const chunks = [];
 
         for (let i = 0; i < items.length; i += chunkSize) {
           chunks.push(items.slice(i, i + chunkSize));
         }
 
-        console.log(`Writing ${sheetName} in ${chunks.length} chunks (sequential)...`);
+        console.log(`Writing ${sheetName} in ${chunks.length} chunks via POST...`);
 
-        // Process chunks SEQUENTIALLY - this was working before
+        // Process chunks SEQUENTIALLY
         for (let i = 0; i < chunks.length; i++) {
           const chunk = chunks[i];
           const isFirst = i === 0;
@@ -108,22 +120,16 @@
             payload = { action: 'appendChunk', sheet: sheetName, data: chunk, chunkIndex: i };
           }
 
-          const encoded = encodeURIComponent(JSON.stringify(payload));
-          const url = `${SCRIPT_URL}?payload=${encoded}&t=${Date.now()}&c=${i}`;
+          console.log(`Chunk ${i + 1}/${chunks.length} POSTing...`);
 
-          console.log(`Chunk ${i + 1}/${chunks.length} sending...`);
-
-          const response = await fetch(url);
-          if (!response.ok) throw new Error(`HTTP ${response.status} on chunk ${i + 1}`);
-          const result = await response.json();
-
+          const result = await this.postToSheets(payload);
           if (result.error) throw new Error(`Server error on chunk ${i + 1}: ${result.error}`);
 
           console.log(`Chunk ${i + 1}/${chunks.length} written`, result);
 
-          // Small delay between chunks to avoid rate limiting (300ms)
+          // Small delay between chunks to avoid rate limiting (200ms)
           if (i < chunks.length - 1) {
-            await new Promise(resolve => setTimeout(resolve, 300));
+            await new Promise(resolve => setTimeout(resolve, 200));
           }
         }
 
