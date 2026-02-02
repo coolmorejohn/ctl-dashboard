@@ -67,45 +67,60 @@
     const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxZ0714JE5nUYsEby7oSclteaNo5UsAtk4sAKgB7vjWkAJAvZU8Fnp3UD4ggcaY2D-xuQ/exec';
 
     const SheetsDB = {
-      // Helper: POST via hidden form (bypasses CORS for large data)
-      postViaForm(payload) {
-        return new Promise((resolve) => {
-          const iframeName = 'sheets_iframe_' + Date.now();
-          const iframe = document.createElement('iframe');
-          iframe.name = iframeName;
-          iframe.style.display = 'none';
-          document.body.appendChild(iframe);
+      // Helper: Write a single chunk via GET
+      async writeChunk(sheetName, data, chunkIndex = 0) {
+        const payload = { action: 'writeChunk', sheet: sheetName, data, chunkIndex };
+        const encodedData = encodeURIComponent(JSON.stringify(payload));
+        const url = `${SCRIPT_URL}?payload=${encodedData}&t=${Date.now()}`;
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      },
 
-          const form = document.createElement('form');
-          form.method = 'POST';
-          form.action = SCRIPT_URL;
-          form.target = iframeName;
-          form.style.display = 'none';
+      // Helper: Write large data in chunks
+      async writeChunked(sheetName, dataObj) {
+        // For Shipments: { dataDate, shipments: [...] }
+        // Split shipments array into chunks of 25 items each
+        const shipments = dataObj.shipments || [];
+        const chunkSize = 25;
+        const chunks = [];
 
-          const input = document.createElement('input');
-          input.type = 'hidden';
-          input.name = 'payload';
-          input.value = JSON.stringify(payload);
-          form.appendChild(input);
+        for (let i = 0; i < shipments.length; i += chunkSize) {
+          chunks.push(shipments.slice(i, i + chunkSize));
+        }
 
-          document.body.appendChild(form);
+        console.log(`Writing ${sheetName} in ${chunks.length} chunks...`);
 
-          // We can't read the response due to cross-origin, but the POST will succeed
-          iframe.onload = () => {
-            setTimeout(() => {
-              document.body.removeChild(form);
-              document.body.removeChild(iframe);
-              resolve({ success: true, method: 'form' });
-            }, 500);
+        // Write first chunk with metadata (overwrites sheet)
+        const firstPayload = {
+          action: 'write',
+          sheet: sheetName,
+          data: { dataDate: dataObj.dataDate, shipments: chunks[0] || [], totalChunks: chunks.length }
+        };
+        const firstEncoded = encodeURIComponent(JSON.stringify(firstPayload));
+        const firstUrl = `${SCRIPT_URL}?payload=${firstEncoded}&t=${Date.now()}`;
+        const firstResponse = await fetch(firstUrl);
+        if (!firstResponse.ok) throw new Error(`HTTP ${firstResponse.status}`);
+        const firstResult = await firstResponse.json();
+        console.log(`Chunk 1/${chunks.length} written:`, firstResult);
+
+        // Append remaining chunks
+        for (let i = 1; i < chunks.length; i++) {
+          const chunkPayload = {
+            action: 'appendChunk',
+            sheet: sheetName,
+            data: chunks[i],
+            chunkIndex: i
           };
+          const chunkEncoded = encodeURIComponent(JSON.stringify(chunkPayload));
+          const chunkUrl = `${SCRIPT_URL}?payload=${chunkEncoded}&t=${Date.now()}`;
+          const chunkResponse = await fetch(chunkUrl);
+          if (!chunkResponse.ok) throw new Error(`HTTP ${chunkResponse.status} on chunk ${i+1}`);
+          const chunkResult = await chunkResponse.json();
+          console.log(`Chunk ${i+1}/${chunks.length} written:`, chunkResult);
+        }
 
-          form.submit();
-
-          // Fallback timeout
-          setTimeout(() => {
-            resolve({ success: true, method: 'form', note: 'timeout' });
-          }, 5000);
-        });
+        return { success: true, chunks: chunks.length };
       },
 
       async read(sheetName) {
@@ -134,27 +149,27 @@
         if (reportDate) payload.reportDate = reportDate;
         const payloadStr = JSON.stringify(payload);
 
-        // Use GET for small payloads (< 4000 chars), form POST for large ones
-        if (payloadStr.length < 4000) {
+        // Use chunked writes for Shipments and DailyLogs (large data)
+        if ((sheetName === 'Shipments' || sheetName === 'DailyLogs') && payloadStr.length > 4000) {
           try {
-            const encodedData = encodeURIComponent(payloadStr);
-            const url = `${SCRIPT_URL}?payload=${encodedData}&t=${Date.now()}`;
-            const response = await fetch(url);
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            const result = await response.json();
-            console.log(`Sheets write result for ${sheetName}:`, result);
-            return { success: true, synced: true, method: 'GET' };
+            const result = await this.writeChunked(sheetName, data);
+            console.log(`Sheets chunked write result for ${sheetName}:`, result);
+            return { success: true, synced: true, method: 'CHUNKED' };
           } catch (error) {
-            console.warn(`Sheets GET write failed for ${sheetName}, trying form POST:`, error.message);
-            // Fall through to form POST
+            console.warn(`Sheets chunked write failed for ${sheetName}:`, error.message);
+            return { success: false, synced: false, error: error.message };
           }
         }
 
-        // Use form POST for large data (bypasses CORS)
+        // Use GET for small payloads
         try {
-          const result = await this.postViaForm(payload);
-          console.log(`Sheets form POST result for ${sheetName}:`, result);
-          return { success: true, synced: true, method: 'POST' };
+          const encodedData = encodeURIComponent(payloadStr);
+          const url = `${SCRIPT_URL}?payload=${encodedData}&t=${Date.now()}`;
+          const response = await fetch(url);
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const result = await response.json();
+          console.log(`Sheets write result for ${sheetName}:`, result);
+          return { success: true, synced: true, method: 'GET' };
         } catch (error) {
           console.warn(`Sheets write failed for ${sheetName}:`, error.message);
           return { success: false, synced: false, error: error.message };
